@@ -105,16 +105,16 @@ list_chain <- foreach::foreach(k = 1:nrow(pars), .verbose = FALSE) %dopar% {
   settings$burnin <- 5000
   settings$thin   <- 10
   length_group    <- rep(p/nb_group, nb_group)
-  settings$group  <- rep(1:nb_group, times = length_group)
-  settings$d      <- degree
-  settings$D      <- lapply(table(settings$group), function(p) diff(diag(p), differences = settings$d ))
-
+  group  <- rep(1:nb_group, times = length_group)
+  d      <- degree
+  D      <- lapply(table(group), function(p) diff(diag(p), differences = d ))
+  
   fold <- pars$fold[k]
   y_train <- Y[which(id.cv[[pars$rep[k]]] != fold)]
   X_train <- X[which(id.cv[[pars$rep[k]]] != fold), ]
 
 
-  chain <- group_fused_HS_MCMC(y=y_train, X=X_train, settings=settings, var_sel = TRUE, b2_ = TRUE)
+  chain <- group_fused_HS_MCMC(y=y_train, X=X_train, group=group, d=d, D=D, settings=settings, var_sel = TRUE, diff3levels = TRUE)
 
   lppd <- sum(log(apply(chain$prob_Y_theta, 2, mean)))
   Pwaic <- sum(apply(log(chain$prob_Y_theta), 2, var))
@@ -147,16 +147,16 @@ list_chain <- foreach::foreach(k = 1:nrow(pars), .verbose = FALSE) %dopar% {
   settings$burnin <- 5000
   settings$thin   <- 10
   length_group    <- rep(p/nb_group, nb_group)
-  settings$group  <- rep(1:nb_group, times = length_group)
-  settings$d      <- degree
-  settings$D      <- lapply(table(settings$group), function(p) diff(diag(p), differences = settings$d ))
+  group  <- rep(1:nb_group, times = length_group)
+  d      <- degree
+  D      <- lapply(table(group), function(p) diff(diag(p), differences = d ))
   
   fold <- pars$fold[k]
   y_train <- Y[which(id.cv[[pars$rep[k]]] != fold)]
   X_train <- X[which(id.cv[[pars$rep[k]]] != fold), ]
   
   
-  chain <- group_fused_HS_MCMC(y=y_train, X=X_train, settings=settings, var_sel = TRUE, b2_ = FALSE)
+  chain <- group_fused_HS_MCMC(y=y_train, X=X_train, group=group, d=d, D=D, settings=settings, var_sel = TRUE, diff3levels = FALSE)
   
   lppd <- sum(log(apply(chain$prob_Y_theta, 2, mean)))
   Pwaic <- sum(apply(log(chain$prob_Y_theta), 2, var))
@@ -190,16 +190,16 @@ list_chain <- foreach::foreach(k = 1:nrow(pars), .verbose = FALSE) %dopar% {
   settings$burnin <- 5000
   settings$thin   <- 10
   length_group    <- rep(p/nb_group, nb_group)
-  settings$group  <- rep(1:nb_group, times = length_group)
-  settings$d      <- degree
-  settings$D      <- lapply(table(settings$group), function(p) diff(diag(p), differences = settings$d ))
+  group  <- rep(1:nb_group, times = length_group)
+  d      <- degree
+  D      <- lapply(table(group), function(p) diff(diag(p), differences = d ))
   
   fold <- pars$fold[k]
   y_train <- Y[which(id.cv[[pars$rep[k]]] != fold)]
   X_train <- X[which(id.cv[[pars$rep[k]]] != fold), ]
   
   
-  chain <- group_fused_HS_MCMC(y=y_train, X=X_train, settings=settings, var_sel = FALSE, b2_ = TRUE)
+  chain <- group_fused_HS_MCMC(y=y_train, X=X_train, group=group, d=d, D=D, settings=settings, var_sel = FALSE, diff3levels = TRUE)
   
   lppd <- sum(log(apply(chain$prob_Y_theta, 2, mean)))
   Pwaic <- sum(apply(log(chain$prob_Y_theta), 2, var))
@@ -232,16 +232,16 @@ list_chain <- foreach::foreach(k = 1:nrow(pars), .verbose = FALSE) %dopar% {
   settings$burnin <- 5000
   settings$thin   <- 10
   length_group    <- rep(p/nb_group, nb_group)
-  settings$group  <- rep(1:nb_group, times = length_group)
-  settings$d      <- degree
-  settings$D      <- lapply(table(settings$group), function(p) diff(diag(p), differences = settings$d ))
+  group  <- rep(1:nb_group, times = length_group)
+  d      <- degree
+  D      <- lapply(table(group), function(p) diff(diag(p), differences = d ))
   
   fold <- pars$fold[k]
   y_train <- Y[which(id.cv[[pars$rep[k]]] != fold)]
   X_train <- X[which(id.cv[[pars$rep[k]]] != fold), ]
   
   
-  chain <- group_fused_HS_MCMC(y=y_train, X=X_train, settings=settings, var_sel = FALSE, b2_ = FALSE)
+  chain <- group_fused_HS_MCMC(y=y_train, X=X_train, group=group, d=d, D=D, settings=settings, var_sel = FALSE, diff3levels = FALSE)
   
   lppd <- sum(log(apply(chain$prob_Y_theta, 2, mean)))
   Pwaic <- sum(apply(log(chain$prob_Y_theta), 2, var))

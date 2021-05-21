@@ -7,30 +7,248 @@ require(foreach)
 require(coda)
 
 
-#' Plot the estimated effects with credible intervals
+
+
+#' MCMC sampler (for one chain) for group fusion / fused Horseshoe prior selection
 #'
-#' @param fit object from \code{sparse_group_fusion_horseshoe} function
-#' @param ... Arguments to be passed to \code{plot} function, such as graphical parameters
 #'
-#' @return
+#' @param y: vector ofthe response variable
+#' @param X: the matrix of the indexing variable, if many groups are present, X is the collection of all matrix associated to each group
+#' @param Z: optional design matrix for a random effect
+#' @param A: optional covariance matrix for a random effect
+#' @param group:  vector of length ncol(X) indicating the number group of each variable in X
+#' @param d: the degree of the difference penalty
+#' @param D: the matrix of the finite difference operator
+#' @param model: c('gaussian', 'probit'), indicating is the responce is gaussian or probit regression
+#' @param settings: a list containing the MCMC settings:
+#' \itemize{
+#'    \item niter: number of iterations of the MCMC chain
+#'    \item burnin: number of initial iterations of the MCMC chain which should be discarded
+#'    \item thin: save only every thin-th iteration
+#' }
+#' @param diff3levels: boolean indicating if three levels (global, group specific and local) of variance parameters should be used on coefficient differences instead of two (global and local), default is TRUE
+#' @param var_sel: boolean indicating if selection of variable is needed (fused) or not (fusion), default choice is TRUE
+#'
+#' @return return a list of the MCMC sample of each parameter
+#'
+#' @author Benjamin Heuclin \email{benjamin.heuclin@@gmail.com}, Frédéric Mortier, Catherine Trottier Marie Denis
+#' @seealso \code{\link{sparse_group_fusion_horseshoe}, \link{fusion_horseshoe_MCMC}}
+#' @references \url{}
 #' @export
 #'
-#' @examples
-plot.effect <- function(fit, type="l", ...){
-  plot(fit$estimations_mean$beta, type=type, ...)
-  lines(fit$estimations_mean$IC_inf_beta, lty = 3)
-  lines(fit$estimations_mean$IC_sup_beta, lty = 3)
-  abline(v=c(0, cumsum(table(fit$settings$group))+0.5))
-  abline(0, 0, lty = 2)
+#' @example R/exemple_2.R
+group_fused_HS_MCMC <- function(y, X, Z=NULL, A=NULL, group,
+                                d=1, D, model = 'gaussian',
+                                settings, diff3levels=TRUE, var_sel = TRUE
+){
+  epsilon = 0
+  
+  if(model != 'gaussian' & model != 'probit') stop("model must be 'gaussian' or 'probit'")
+  if(model == 'gaussian') print("Sparse Group Fused Horseshoe prior for gaussian responses")
+  if(model == 'probit') print("Sparse Group Fused Horseshoe prior for binary responses")
+  if(!is.null(A) & is.null(Z)) stop("you may specify Z")
+  if(!is.null(Z) & is.null(A)) stop("you may specify A")
+  Y <- y
+  n_iter        <- settings$niter
+  burnin        <- settings$burnin
+  thinin        <- settings$thin
+  n             <- length(Y)
+  G             <- max(group)
+  group_length  <- table(group)
+  p             <- ncol(X)
+  idx_g         <- list()
+  for(g in 1:G) idx_g[[g]] <- c(0, cumsum((group_length-d)))[g] + 1:(group_length[g]-d)
+  if(G==1) diff3levels <- FALSE
+  
+  
+  chain         <- list()
+  chain$mu      <- rep(   NA, floor(n_iter - burnin)/thinin)
+  chain$beta    <- matrix(NA, floor(n_iter - burnin)/thinin, p)
+  chain$upsilon   <- matrix(NA, floor(n_iter - burnin)/thinin, p)
+  chain$omega   <- matrix(NA, floor(n_iter - burnin)/thinin, sum(group_length - d))
+  chain$lambda2 <- matrix(NA, floor(n_iter - burnin)/thinin, G)
+  chain$tau2 <- rep(NA, floor(n_iter - burnin)/thinin)
+  if(!is.null(A)) chain$U   <- matrix(NA, floor(n_iter - burnin)/thinin, ncol(Z))
+  if(!is.null(A)) chain$su2 <- rep(   NA, floor(n_iter - burnin)/thinin)
+  if(model == 'probit') {chain$Y <- matrix(NA, floor(n_iter - burnin)/thinin, n)
+  colnames(chain$Y) <- paste0('Y', 1:ncol(chain$Y))}
+  chain$se2     <- rep(   NA, floor(n_iter - burnin)/thinin)
+  
+  
+  mu              <- mean(Y)
+  beta            <-  c(mvnfast::rmvn(p, 0, 1)) # c(rep(1, 3), rep(0, p-3))
+  omega   <- phi  <- rep(1, sum(group_length - d))
+  upsilon <- eta  <- rep(0, sum(group_length))  # c(1e5, 1e5, 1e5, rep(1, p-3)) #
+  lambda2 <- psi  <- rep(1, G)
+  tau2            <- 1e-3 # abs(c(rmvn(1, 0, 0.00001)))  #
+  ksi             <- 1
+  if(!is.null(A)){
+    Ainv          <- solve(A)
+    su2 <- psi    <- 1
+    U             <- rep(0, ncol(Z))
+    ZU            <- Z %*% U
+  }else{
+    ZU            <- rep(0, n)
+  }
+  se2 <- a        <- abs(c(mvnfast::rmvn(1, 0, 1))) #
+  
+  
+  BtSB            <- rep(NA, G)
+  BtSB_a          <- rep(NA, G)
+  BtSB_b          <- rep(NA, G)
+  iter<- ii       <- 1
+  q               <- ncol(Z)
+  
+  Upsilon_g_list <- DOD_list <- list()
+  
+  # MCMC
+  print("0%")
+  while(iter <= n_iter){
+    # if(iter %% 100 == 0) print(iter)
+    if(iter %% (n_iter/10) == 0) print(paste((iter %/% (n_iter/10))*10, "%"))
+    
+    # print(iter)
+    # if(iter == 292) browser()
+    
+    # Update Y for probit regression
+    if(model == 'probit'){
+      Xb = mu + X %*% beta + ZU
+      for(i in 1:n){
+        if(y[i]==1) Y[i] <- truncnorm::rtruncnorm(1, mean = Xb[i], sd = 1, a = 0)
+        else Y[i] <- truncnorm::rtruncnorm(1, mean = Xb[i], sd = 1, b = 0)
+      }
+    }
+    
+    # mu
+    mu <- rnorm(1, 1/n * sum(Y - X %*% beta - ZU), se2/n)
+    
+    
+    for(g in 1:G){
+      # print(g)
+      # selection within group
+      if (!var_sel){
+        Upsilon_g <- 0*diag(group_length[g])
+        diag(Upsilon_g)[1:d] <- 1
+        Upsilon_g_list[[g]] <- Upsilon_g
+      }else{
+        for(i in 1 : group_length[g]){
+          upsilon[which(group == g)[i]] <- rinvgamma(n = 1, shape = 1, rate = 1/eta[which(group == g)[i]] + beta[which(group == g)[i]]^2/(2*se2))+1e-5
+          eta[which(group == g)[i]] <- rinvgamma(n = 1, shape = 1, rate = 1 + 1/upsilon[which(group == g)[i]])
+        }
+        Upsilon_g_list[[g]] <- Upsilon_g <- diag(1/upsilon[which(group == g)])
+      }
+      
+      # fusion within group
+      for(i in 1 : (group_length[g] - d)){
+        omega[idx_g[[g]][i]] <- rinvgamma(n= 1, shape = 1, rate = 1/ phi[idx_g[[g]][i]] + (D[[g]][i, ] %*% beta[which(group == g)])^2 / (se2*tau2 * lambda2[g]))+1e-5
+        phi[idx_g[[g]][i]] <- rinvgamma(n = 1, shape = 1, rate = 1+1/omega[idx_g[[g]][i]])
+      }
+      Omega_g <- diag(1/omega[idx_g[[g]]])
+      
+      
+      DOD_list[[g]] <- DOD <- t(D[[g]]) %*% Omega_g %*% D[[g]]
+      
+      # beta_g
+      prec <- crossprod(X[, which(group == g)])/se2   +
+        1/(se2) * (Upsilon_g + (1/tau2) * (1/lambda2[g]) * DOD ) +
+        epsilon*diag(group_length[g])
+      tmp_bg <- 1/se2 * t(X[, which(group == g)]) %*% (Y - mu -  X[, which(group != g)] %*% beta[which(group != g)] - ZU)
+      
+      s <- svd(prec)
+      id.svd <- 1:group_length[g]
+      Dinv <- diag(1/s$d[id.svd])
+      beta[which(group == g)] <- crossprod(t(s$u[, id.svd] %*% diag(1/sqrt(s$d[id.svd]))),
+                                           c(rmvn(1, diag(1/sqrt(s$d[id.svd])) %*% t(s$u[, id.svd]) %*% tmp_bg, diag(length(id.svd)), isChol = TRUE)))
+      
+      
+      if(diff3levels){
+        lambda2[g] <- rinvgamma(n = 1, shape = (group_length[g]+1)/2, rate = 1/ psi[g] +
+                                  t(beta[which(group == g)]) %*% (DOD + epsilon*diag(group_length[g])) %*% beta[which(group == g)] / (2*se2*tau2))
+        if(lambda2[g] < 1e-5) lambda2[g] <- 1e-5
+        psi[g] <- rinvgamma(n = 1, shape = 1, rate = 1+1/lambda2[g])
+      }else{
+        lambda2[g] <- 1
+      }
+      
+      BtSB[g]   <- t(beta[which(group == g)])     %*%     (Upsilon_g + (1/tau2) * (1/lambda2[g]) * DOD)     %*%     beta[which(group == g)]
+      BtSB_a[g] <- t(beta[which(group == g)])     %*%     Upsilon_g     %*%     beta[which(group == g)]
+      BtSB_b[g] <- t(beta[which(group == g)])     %*%     ( 1/lambda2[g] * (DOD + epsilon*diag(group_length[g])))     %*%     beta[which(group == g)]
+      
+    }
+    
+    # tau2 (global variance paramter on coefficient differences)
+    rate_tau2 = 1/ksi + sum(BtSB_b ) / (2 * se2)
+    tau2 <- rinvgamma(n = 1, shape = (p+1)/2, rate = rate_tau2)
+    if(tau2 < 1e-5) tau2 <- 1e-5
+    ksi <-  rinvgamma(n = 1, shape = 1, rate = 1+1/tau2)
+    
+    
+    for(g in 1:G){
+      BtSB[g]   <- t(beta[which(group == g)])     %*%     (Upsilon_g_list[[g]] + (1/tau2) * (1/lambda2[g]) * DOD_list[[g]])     %*%     beta[which(group == g)]
+    }
+    
+    
+    # random effect
+    if(!is.null(A)){
+      Sigma_u <- solve(Ainv / su2 + crossprod(Z)/se2)
+      U <- as.vector(rmvn(1, Sigma_u %*% crossprod(Z, Y - mu - X %*% beta)/se2, Sigma_u))
+      su2 <-  rinvgamma(n = 1, shape = 1/2 + q/2, rate = 1/psi + crossprod(U, Ainv %*% U)/2)
+      psi <-  rinvgamma(n = 1, shape = 1, rate = 1+1/su2)
+      ZU <- Z %*% U
+    }
+    
+    rate_se2 <- 1/a + sum(BtSB/(2)) + crossprod(Y - mu - X %*% beta - ZU)/2
+    se2 <- rinvgamma(n= 1, shape = (1+p+n)/2, rate = rate_se2)
+    a <- rinvgamma(n = 1, shape = 1, rate = 1+1/se2)
+    
+    #__________________________________________
+    if(iter > burnin & iter %% thinin == 0){
+      chain$mu[ii] <- mu
+      chain$beta[ii, ] <- beta
+      chain$upsilon[ii, ] <- upsilon
+      chain$omega[ii, ] <- omega
+      chain$lambda2[ii, ] <- lambda2
+      chain$tau2[ii] <- tau2
+      if(!is.null(A)) chain$U[ii, ] <- U
+      if(!is.null(A)) chain$su2[ii] <- su2
+      if(model == 'probit') chain$Y[ii, ] <- Y
+      chain$se2[ii] <- se2
+      ii <- ii + 1
+    }
+    iter <- iter + 1
+  }
+  prob_Y_theta <- matrix(NA, length(chain$se2), n); colnames(prob_Y_theta) <- paste0("prob_Y_theta", 1:n)
+  if(is.null(A)){
+    for(nit in 1:length(chain$se2)){
+      mu <- chain$mu[nit]
+      beta = chain$beta[nit, ]
+      se2 = chain$se2[nit]
+      # y.hat <- x %*% beta + Z %*% kronecker(diag(nb_niv), diag(sdu)) %*% chain_h$u[nit, ]
+      prob_Y_theta[nit, ] <- unlist(lapply(1:n, function(i) mvnfast::dmvn(Y[i], mu +X[i, ] %*% beta, se2)))
+    }}else{
+      for(nit in 1:length(chain$se2)){
+        mu <- chain$mu[nit]
+        beta = chain$beta[nit, ]
+        U = chain$U[nit, ]
+        se2 = chain$se2[nit]
+        # y.hat <- x %*% beta + Z %*% kronecker(diag(nb_niv), diag(sdu)) %*% chain_h$u[nit, ]
+        prob_Y_theta[nit, ] <- unlist(lapply(1:n, function(i) mvnfast::dmvn(Y[i], mu +X[i, ] %*% beta + Z[i, ] %*% U, se2)))
+      }
+    }
+  chain$loglikelihood <- rowSums(log(prob_Y_theta))
+  chain$prob_Y_theta <- prob_Y_theta
+  return(chain)
 }
 
 
 
 
-# Horseshoe ---------------------------------------------------------------
 
 
-#' Main function to run the sparse group selection for indexing variables within group using group fusion / fused horseshoe prior.
+
+
+
+#' (BETA VERSION) Main function to run the sparse group selection for indexing variables within group using group fusion / fused horseshoe prior.
 #'
 #'
 #' \code{group_fused_HS} compute the bayesian hierarchical model described in the paper ... to ...
@@ -82,9 +300,9 @@ plot.effect <- function(fit, type="l", ...){
 #' @example R/exemple_1.R
 #'
 group_fused_HS <- function(y, X, selection = TRUE, degree = 1, nb_group = 1, length_group = NULL,
-                                          model = 'gaussian', niter = 10000, burnin = 5000, thin = 10,
-                                          CV = NULL, id.cv = NULL, rep = 1, cores = 1, gelman.plot=FALSE, traceplot=FALSE,
-                                          Z = NULL, A = NULL, save = TRUE, path =NULL, ...)
+                           model = 'gaussian', niter = 10000, burnin = 5000, thin = 10,
+                           CV = NULL, id.cv = NULL, rep = 1, cores = 1, gelman.plot=FALSE, traceplot=FALSE,
+                           Z = NULL, A = NULL, save = TRUE, path = NULL, ...)
 {
   if(cores == -1) cores <- detectCores()-1
   print(paste("Nb cores = ", cores))
@@ -92,13 +310,13 @@ group_fused_HS <- function(y, X, selection = TRUE, degree = 1, nb_group = 1, len
     if(selection) path <- "Fused_HS/" else path <- "Fusion_HS/"
     system(paste0("mkdir ", path))
   }
-
+  
   output          <- list()
   settings        <- list()
   settings$niter  <- niter
   settings$burnin <- burnin
   settings$thin   <- thin
-
+  
   p <- ncol(X)
   if(p%%nb_group !=0 & is.null(length_group)) warning("The number of variables is not a multiple of the number of groups.")
   if(is.null(length_group)) length_group <- rep(p/nb_group, nb_group) else nb_group <- length(length_group)
@@ -115,12 +333,12 @@ group_fused_HS <- function(y, X, selection = TRUE, degree = 1, nb_group = 1, len
     settings$id.cv <- id.cv
   }
   output$settings <- settings
-
+  
   # MCMC _____________________________________________________________________________
   if(is.null(CV)) CV <- 1
   pars <- expand.grid(rep = 1:rep, fold = 1:CV)
   doParallel::registerDoParallel(cores = min(cores, nrow(pars)))
-
+  
   list_chain <- foreach::foreach(k = 1:nrow(pars), .verbose = FALSE) %dopar% {
     fold <- pars$fold[k]
     if(CV){
@@ -132,12 +350,12 @@ group_fused_HS <- function(y, X, selection = TRUE, degree = 1, nb_group = 1, len
       X_train <- X
       if(!is.null(Z)) Z_train <- Z else Z_train <- NULL
     }
-
+    
     chain <- group_fused_HS_MCMC(y=y_train, X=X_train, Z=Z_train,
-                                                group=group,
-                                                A=A, d=d, D=D, model = model, settings=settings,
-                                                var_sel = selection, ...)
-
+                                 group=group,
+                                 A=A, d=d, D=D, model = model, settings=settings,
+                                 var_sel = selection, ...)
+    
     lppd <- sum(log(apply(chain$prob_Y_theta, 2, mean)))
     Pwaic <- sum(apply(log(chain$prob_Y_theta), 2, var))
     waic <- -2 * lppd + 2 * Pwaic
@@ -147,26 +365,26 @@ group_fused_HS <- function(y, X, selection = TRUE, degree = 1, nb_group = 1, len
     save(chain, settings, file = paste0(path, "/chain_rep_", pars$rep[k], "_fold_", pars$fold[k], ".Rdata") )
     if(save) return() else return(chain)
   }
-
+  
   if(!save) {output$list_chain <- list_chain ; rm(list_chain)}
-
-
-
+  
+  
+  
   # Gelman diag _____________________________________________________________________________
   output$gelman.diag <- NULL
-  if(rep>1){
+  if(nrow(pars)>1){
     mcmc_list_chain <- list()
-    for(k in 1:rep){
-      if(save) load(paste0(path, "/chain_rep_", k, "_fold_", 1, ".Rdata")) else chain <- output$list_chain[[k]]
+    for(k in 1:nrow(pars)){
+      if(save) load(paste0(path, "/chain_rep_", pars$rep[k], "_fold_", pars$fold[k], ".Rdata")) else chain <- output$list_chain[[k]]
       if(is.null(A)){
-        if(model!='probit' & !CV) tmp <- do.call(cbind, chain[c("mu", "beta", "se2", "loglikelihood")])
+        if(model!='probit' & !CV) tmp <- do.call(cbind, chain[c("mu", "beta", "se2")])
         if(model!='probit' & CV) tmp <- do.call(cbind, chain[c("mu", "beta", "se2")])
-        if(model=='probit' & !CV) tmp <- do.call(cbind, chain[c("mu", "beta",  "loglikelihood")]) # "Y",
-        if(model=='probit' & CV) tmp <- do.call(cbind, chain[c("mu", "beta")]) # "Y",
+        if(model=='probit' & !CV) tmp <- do.call(cbind, chain[c("mu", "beta")]) 
+        if(model=='probit' & CV) tmp <- do.call(cbind, chain[c("mu", "beta")]) 
       }else{
-        if(model!='probit' & !CV) tmp <- do.call(cbind, chain[c("mu", "beta", "U", "su2", "se2", "loglikelihood")])
+        if(model!='probit' & !CV) tmp <- do.call(cbind, chain[c("mu", "beta", "U", "su2", "se2")])
         if(model!='probit' & CV) tmp <- do.call(cbind, chain[c("mu", "beta", "U", "su2", "se2")])
-        if(model=='probit' & !CV) tmp <- do.call(cbind, chain[c("mu", "beta", "U", "su2",  "loglikelihood")]) # "Y",
+        if(model=='probit' & !CV) tmp <- do.call(cbind, chain[c("mu", "beta", "U", "su2")]) # "Y",
         if(model=='probit' & !CV) tmp <- do.call(cbind, chain[c("mu", "beta", "U", "su2")]) # "Y",
       }
       mcmc_list_chain[[k]] <- coda::mcmc(tmp)#, thin = thinin, start = burnin+1, end = niter)
@@ -180,37 +398,35 @@ group_fused_HS <- function(y, X, selection = TRUE, degree = 1, nb_group = 1, len
     if(gelman.plot) coda::gelman.plot(output$mcmc_list)
     if(traceplot) plot(output$mcmc_list)
   }
-
-
-
-
+  
+  
+  
+  
   # estimation_mean _____________________________________________________________________________
   estimation <- list()
   estimation$mu_df  <- estimation$se2_df <- NULL
   estimation$beta_df <- estimation$IC_inf_beta_df <- estimation$IC_sup_beta_df <- NULL
-  estimation$omega_df <- NULL; estimation$lambda_omega_2_df <- NULL; estimation$tau_omega_2_df <- NULL
-  if(selection){estimation$delta_df <- estimation$lambda_delta_2_df <- estimation$tau_delta_2_df <- NULL}
+  estimation$omega_df <- NULL; estimation$lambda2_df <- NULL; estimation$tau2_df <- NULL
+  if(selection){estimation$upsilon_df <- NULL}
   if(!is.null(A)){estimation$su2_df <- estimation$U_df <- NULL }
   if(model=='probit') estimation$Y_df <- NULL
   estimation$lppd_df <- estimation$Pwaic_df <- estimation$waic_df <- NULL
   d=degree
-
+  
   for(k in 1:nrow(pars)){
     if(save) load(paste0(path, "/chain_rep_", pars$rep[k], "_fold_", pars$fold[k], ".Rdata")) else chain <- output$list_chain[[k]]
-
+    
     estimation$mu_df <- rbind(estimation$mu_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], mu = mean(chain$mu)))
     estimation$beta_df <- rbind(estimation$beta_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], id = 1:p, beta = colMeans(chain$beta)))
     estimation$IC_inf_beta_df <- rbind(estimation$IC_inf_beta_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], id = 1:p, IC_inf_beta = apply(chain$beta,2, quantile, 0.025)))
     estimation$IC_sup_beta_df <- rbind(estimation$IC_sup_beta_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], id = 1:p, IC_sup_beta = apply(chain$beta,2, quantile, 0.975)))
-
+    
     estimation$se2_df <- rbind(estimation$se2_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], se2=mean(chain$se2)))
     estimation$omega_df <- rbind(estimation$omega_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], id = 1:(p-nb_group*d), omega = colMeans(chain$omega)))
-    estimation$lambda_omega_2_df <- rbind(estimation$lambda_omega_2_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], id = 1:nb_group, lambda_omega_2 = colMeans(chain$lambda_omega_2)))
-    estimation$tau_omega_2_df <- rbind(estimation$tau_omega_2_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], tau_omega_2 = mean(chain$tau_omega_2)))
+    estimation$lambda2_df <- rbind(estimation$lambda2_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], id = 1:nb_group, lambda2 = colMeans(chain$lambda2)))
+    estimation$tau2_df <- rbind(estimation$tau2_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], tau2 = mean(chain$tau2)))
     if(selection){
-      estimation$delta_df <- rbind(estimation$delta_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], id = 1:p, delta = colMeans(chain$delta)))
-      estimation$lambda_delta_2_df <- rbind(estimation$lambda_delta_2_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], id = 1:nb_group, lambda_delta_2 = colMeans(chain$lambda_delta_2)))
-      estimation$tau_delta_2_df <- rbind(estimation$tau_delta_2_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], tau_delta_2 = mean(chain$tau_delta_2)))
+      estimation$upsilon_df <- rbind(estimation$upsilon_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], id = 1:p, upsilon = colMeans(chain$upsilon)))
     }
     if(!is.null(A)){
       estimation$su2_df <- rbind(estimation$su2_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], su2 = mean(chain$su2)))
@@ -221,21 +437,19 @@ group_fused_HS <- function(y, X, selection = TRUE, degree = 1, nb_group = 1, len
     estimation$Pwaic_df <- rbind(estimation$Pwaic_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], Pwaic = chain$Pwaic))
     estimation$waic_df <- rbind(estimation$waic_df, data.frame(rep = pars$rep[k], fold = pars$fold[k], waic = chain$waic))
   }
-
+  
   output$estimations <- estimation
-
+  
   estimation_mean <- list()
   estimation_mean$mu <- mean(estimation$mu_df$mu)
   estimation_mean$beta <- aggregate(estimation$beta_df$beta, by = list(id = estimation$beta_df$id), FUN = mean)$x
   estimation_mean$IC_inf_beta <- aggregate(estimation$IC_inf_beta_df$IC_inf_beta, by = list(id = estimation$IC_inf_beta_df$id), FUN = mean)$x
   estimation_mean$IC_sup_beta <- aggregate(estimation$IC_sup_beta_df$IC_sup_beta, by = list(id = estimation$IC_sup_beta_df$id), FUN = mean)$x
   estimation_mean$omega <- aggregate(estimation$omega_df$omega, by = list(id = estimation$omega_df$id), FUN = mean)$x
-  estimation_mean$lambda_omega_2 <- aggregate(estimation$lambda_omega_2_df$lambda_omega_2, by = list(id = estimation$lambda_omega_2_df$id), FUN = mean)$x
-  estimation_mean$tau_omega_2 <- mean(estimation$tau_omega_2_df$tau_omega_2)
+  estimation_mean$lambda2 <- aggregate(estimation$lambda2_df$lambda2, by = list(id = estimation$lambda2_df$id), FUN = mean)$x
+  estimation_mean$tau2 <- mean(estimation$tau2_df$tau2)
   if(selection){
-    estimation_mean$delta <- aggregate(estimation$delta_df$delta, by = list(id = estimation$delta_df$id), FUN = mean)$x
-    estimation_mean$lambda_delta_2 <- aggregate(estimation$lambda_delta_2_df$lambda_delta_2, by = list(id = estimation$lambda_delta_2_df$id), FUN = mean)$x
-    estimation_mean$tau_delta_2 <- mean(estimation$tau_delta_2_df$tau_delta_2)
+    estimation_mean$upsilon <- aggregate(estimation$upsilon_df$upsilon, by = list(id = estimation$upsilon_df$id), FUN = mean)$x
   }
   if(!is.null(A)){
     estimation_mean$su2 <- mean(estimation$su2_df$su2)
@@ -248,25 +462,25 @@ group_fused_HS <- function(y, X, selection = TRUE, degree = 1, nb_group = 1, len
   estimation_mean$waic     <- mean(estimation$waic_df$waic)
   output$estimations_mean  <- estimation_mean
   output$waic              <- estimation_mean$waic
-
-
-
-
-
+  
+  
+  
+  
+  
   #_________________________________________________________________________________________
-
-
+  
+  
   if(CV>1){
     rmse_cv_folds <- F1_score_cv_folds <- matrix(NA, rep, CV)
     rownames(rmse_cv_folds) <- rownames(F1_score_cv_folds) <- paste0("rep_", 1:rep)
     colnames(rmse_cv_folds) <- colnames(F1_score_cv_folds) <- paste0("fold_", 1:CV)
-
+    
     for(i in 1:rep){
       for(k in 1:CV){
         mu <- estimation$mu_df$mu[estimation$mu_df$rep == i & estimation$mu_df$fold == k]
         beta <- estimation$beta_df$beta[estimation$beta_df$rep == i & estimation$beta_df$fold == k]
         if(!is.null(A)) U <- estimation$U_df$U[estimation$U_df$rep == i & estimation$U_df$fold == k]
-
+        
         if( is.null(A)) y_pred <- mu + X[which(id.cv[[i]] == k), ]%*% beta else y_pred <- mu + X[which(id.cv[[i]] == k), ]%*% beta + Z[which(id.cv[[i]] == k), ]%*% U
         if(model == "gaussian"){
           rmse_cv_folds[i, k] <- sqrt(mean((y_pred - y[which(id.cv[[i]] == k)])^2))
@@ -290,11 +504,11 @@ group_fused_HS <- function(y, X, selection = TRUE, degree = 1, nb_group = 1, len
       }
     }
   }
-
-
-
+  
+  
+  
   return(output)
-
+  
 }
 
 
@@ -304,334 +518,23 @@ group_fused_HS <- function(y, X, selection = TRUE, degree = 1, nb_group = 1, len
 
 
 
-
-
-#' MCMC sampler (for one chain) for group fusion / fused Horseshoe prior selection
+#' Plot the estimated effects with credible intervals
 #'
+#' @param fit object from \code{sparse_group_fusion_horseshoe} function
+#' @param ... Arguments to be passed to \code{plot} function, such as graphical parameters
 #'
-#' @param y vector ofthe response variable
-#' @param X the matrix of the indexing variable, if many groups are present, X is the collection of all matrix associated to each group
-#' @param Z optional design matrix for a random effect
-#' @param A optional covariance matrix for a random effect
-#' @param group:  vector of length ncol(X) indicating the number group of each variable in X
-#' @param d: the degree of the difference penalty
-#' @param D: the matrix of the finite difference operator
-#' @param model c('gaussian', 'probit'), indicating is the responce is gaussian or probit regression
-#' @param settings a list containing the MCMC settings:
-#' \itemize{
-#'    \item niter: number of iterations of the MCMC chain
-#'    \item burnin: number of initial iterations of the MCMC chain which should be discarded
-#'    \item thin: save only every thin-th iteration
-#' }
-#' @param delta_ boolean indicating if a local parameters on each coefficient should be used, default is TRUE
-#' @param lambda_delta_2_ boolean indicating if a global parameters on the coefficient at the group level should be used, default is TRUE
-#' @param tau_delta_2_ boolean indicating if a global parameter on the coefficient  over all groups should be used, if the number of group is upper than one, default is TRUE, otherwise it is FALSE
-#' @param omega_ boolean indicating if a local parameters on coefficient differences should be used, default is TRUE
-#' @param lambda_omega_2_ boolean indicating if a global parameters on coefficient differences at the group level should be used, default is TRUE
-#' @param tau_omega_2_ boolean indicating if a global parameter on coefficient differences over all groups should be used, if the number of group is upper than one, default is TRUE, otherwise it is FALSE
-#'
-#' @return return a list of the MCMC sample of each parameter
-#'
-#' @author Benjamin Heuclin \email{benjamin.heuclin@@gmail.com}, Frédéric Mortier, Catherine Trottier Marie Denis
-#' @seealso \code{\link{sparse_group_fusion_horseshoe}, \link{fusion_horseshoe_MCMC}}
-#' @references \url{}
+#' @return
 #' @export
 #'
-#' @example R/exemple_2.R
-group_fused_HS_MCMC <- function(y, X, Z=NULL, A=NULL, group,
-                                               d=1, D, model = 'gaussian',
-                                               settings,
-                                               tau = FALSE, lambda = FALSE,
-                                               omega_ = TRUE, delta_ = TRUE,
-                                               a2_ = FALSE, b2_ = TRUE,
-                                               lambda_a= FALSE, lambda_b =TRUE,
-                                               var_sel = TRUE, epsilon = 0){
-
-  if(!var_sel) {a2_ <- FALSE; lambda_a <- FALSE}
-  if(model != 'gaussian' & model != 'probit') stop("model must be 'gaussian' or 'probit'")
-  if(model == 'gaussian') print("Sparse Group Fused Horseshoe prior for gaussian responses")
-  if(model == 'probit') print("Sparse Group Fused Horseshoe prior for binary responses")
-  if(!is.null(A) & is.null(Z)) stop("you may specify Z")
-  if(!is.null(Z) & is.null(A)) stop("you may specify A")
-  Y <- y
-  n_iter        <- settings$niter
-  burnin        <- settings$burnin
-  thinin        <- settings$thin
-  n             <- length(Y)
-  G             <- max(group)
-  group_length  <- table(group)
-  p             <- ncol(X)
-  idx_g         <- list()
-  for(g in 1:G) idx_g[[g]] <- c(0, cumsum((group_length-d)))[g] + 1:(group_length[g]-d)
-  if(G==1) {lambda_a= FALSE; lambda_b =TRUE}
-
-
-  chain         <- list()
-  chain$mu      <- rep(   NA, floor(n_iter - burnin)/thinin)
-  chain$beta    <- matrix(NA, floor(n_iter - burnin)/thinin, p)
-  chain$delta   <- matrix(NA, floor(n_iter - burnin)/thinin, p)
-  chain$omega   <- matrix(NA, floor(n_iter - burnin)/thinin, sum(group_length - d))
-  chain$lambda_delta_2      <- matrix(NA, floor(n_iter - burnin)/thinin, G)
-  chain$lambda_omega_2      <- matrix(NA, floor(n_iter - burnin)/thinin, G)
-  # chain$tau2    <- matrix(NA, floor(n_iter - burnin)/thinin, G)
-  # chain$lambda2 <- rep(   NA, floor(n_iter - burnin)/thinin)
-  chain$tau_delta_2 <- rep(   NA, floor(n_iter - burnin)/thinin)
-  chain$tau_omega_2 <- rep(   NA, floor(n_iter - burnin)/thinin)
-  if(!is.null(A)) chain$U   <- matrix(NA, floor(n_iter - burnin)/thinin, ncol(Z))
-  if(!is.null(A)) chain$su2 <- rep(   NA, floor(n_iter - burnin)/thinin)
-  if(model == 'probit') {chain$Y <- matrix(NA, floor(n_iter - burnin)/thinin, n); colnames(chain$Y) <- paste0('Y', 1:ncol(chain$Y))}
-  chain$se2     <- rep(   NA, floor(n_iter - burnin)/thinin)
-
-
-  mu            <- mean(Y)
-  beta          <-  c(mvnfast::rmvn(p, 0, 1)) # c(rep(1, 3), rep(0, p-3))
-  omega         <- phi <- rep(1, sum(group_length - d))
-  alpha <- eta  <- rep(0, sum(group_length))  # c(1e5, 1e5, 1e5, rep(1, p-3)) #
-  tau2 <- nu    <- rep(1, G)
-  a2 <- eta_a2  <- rep(1, G)
-  b2 <- eta_b2  <- rep(1, G)
-  lambda2       <- ifelse(lambda, 1e-5, 1) # abs(c(rmvn(1, 0, 0.00001)))  #
-  lambda_a2       <- ifelse(lambda_a, 1e-3, 1) # abs(c(rmvn(1, 0, 0.00001)))  #
-  lambda_b2       <- ifelse(lambda_b, 1e-3, 1) # abs(c(rmvn(1, 0, 0.00001)))  #
-  ksi           <- 1
-  ksi_a           <- 1
-  ksi_b           <- 1
-  if(!is.null(A)){
-    Ainv          <- solve(A)
-    su2 <- psi <- 1
-    U <- rep(0, ncol(Z))
-    ZU <- Z %*% U
-  }else{
-    ZU <- rep(0, n)
-  }
-  se2 <- a      <- abs(c(mvnfast::rmvn(1, 0, 1))) #
-
-
-  BtSB          <- rep(NA, G)
-  BtSB_a        <- rep(NA, G)
-  BtSB_b       <- rep(NA, G)
-  iter<- ii     <- 1
-  q             <- ncol(Z)
-
-  Delta_g_list <- DOD_list <- list()
-
-  # MCMC
-  print("0%")
-  while(iter <= n_iter){
-    # if(iter %% 100 == 0) print(iter)
-    if(iter %% (n_iter/10) == 0) print(paste((iter %/% (n_iter/10))*10, "%"))
-
-    # print(iter)
-    # if(iter == 292) browser()
-
-    # Update Y for probit regression
-    if(model == 'probit'){
-      Xb = mu + X %*% beta + ZU
-      for(i in 1:n){
-        if(y[i]==1) Y[i] <- truncnorm::rtruncnorm(1, mean = Xb[i], sd = 1, a = 0)
-        else Y[i] <- truncnorm::rtruncnorm(1, mean = Xb[i], sd = 1, b = 0)
-      }
-    }
-
-    # mu
-    mu <- rnorm(1, 1/n * sum(Y - X %*% beta - ZU), se2/n)
-
-
-    for(g in 1:G){
-
-      # print(g)
-      # selection within group
-      if (!var_sel){
-        Delta_g <- 0*diag(group_length[g])
-        diag(Delta_g)[1:d] <- 1
-        Delta_g_list[[g]] <- Delta_g
-      }else{
-        if(delta_){
-          for(i in 1 : group_length[g]){
-            alpha[which(group == g)[i]] <- rinvgamma(n = 1, shape = 1, rate = 1/eta[which(group == g)[i]] + beta[which(group == g)[i]]^2/(2*se2*lambda2*lambda_a2*tau2[g]*a2[g]))+1e-5
-            eta[which(group == g)[i]] <- rinvgamma(n = 1, shape = 1, rate = 1 + 1/alpha[which(group == g)[i]])
-          }
-          Delta_g_list[[g]] <- Delta_g <- diag(1/alpha[which(group == g)])
-        }else{
-          Delta_g_list[[g]] <- Delta_g <- diag(group_length[g])
-        }
-      }
-
-      # fusion within group
-      if(omega_){
-        for(i in 1 : (group_length[g] - d)){
-          omega[idx_g[[g]][i]] <- rinvgamma(n= 1, shape = 1, rate = 1/ phi[idx_g[[g]][i]] + (D[[g]][i, ] %*% beta[which(group == g)])^2 / (se2 * lambda2*lambda_b2 * tau2[g] * b2[g]))+1e-5
-          phi[idx_g[[g]][i]] <-rinvgamma(n = 1, shape = 1, rate = 1+1/omega[idx_g[[g]][i]])
-        }
-        Omega_g <- diag(1/omega[idx_g[[g]]])
-      }else{
-        Omega_g <- diag(1/omega[idx_g[[g]]])
-      }
-
-      DOD_list[[g]] <- DOD <- t(D[[g]]) %*% Omega_g %*% D[[g]]
-      # if(var_sel){
-      #   DOD <- t(D[[g]]) %*% Omega_g %*% D[[g]]
-      # }else{
-      #   svd.DOD <- svd(t(D[[g]]) %*% Omega_g %*% D[[g]])
-      #   id.svd <- which(svd.DOD$d>1E-5)
-      #   DOD <-  svd.DOD$u[, id.svd] %*% diag(svd.DOD$d[id.svd]) %*% t(svd.DOD$u[, id.svd])
-      #   # DOD <- t(D[[g]]) %*% Omega_g %*% D[[g]] + 1e-5*diag(group_length[g])
-      # }
-
-
-      # beta_g
-      prec <- crossprod(X[, which(group == g)])/se2   +
-        1/(se2 * lambda2 * tau2[g]) * ((1/lambda_a2) * (1/a2[g]) * Delta_g +
-                                         (1/lambda_b2) * (1/b2[g]) * DOD ) +
-        epsilon*diag(group_length[g])
-      tmp_bg <- 1/se2 * t(X[, which(group == g)]) %*% (Y - mu -  X[, which(group != g)] %*% beta[which(group != g)] - ZU)
-      # Sigma_bg <- solve(prec)
-      # beta[which(group == g)] <- rmvn(1, Sigma_bg %*% tmp_bg, Sigma_bg)
-
-      s <- svd(prec)
-      # if(method=="pseudoinv") id.svd <- which(s$d>epsilon) else id.svd <- 1:group_length[g]
-      id.svd <- 1:group_length[g]
-      # id.svd <- which(s$d>1E-5)
-      Dinv <- diag(1/s$d[id.svd])
-      # Sigma_bg = s$u[, id.svd] %*% Dinv %*% t(s$u[, id.svd])
-      beta[which(group == g)] <- crossprod(t(s$u[, id.svd] %*% diag(1/sqrt(s$d[id.svd]))),
-                                           c(rmvn(1, diag(1/sqrt(s$d[id.svd])) %*% t(s$u[, id.svd]) %*% tmp_bg, diag(length(id.svd)), isChol = TRUE)))
-
-      # BtSB[g]   <- t(beta[which(group == g)])     %*%     ((1/lambda_a2) *( 1/a2[g]) * Delta_g + (1/lambda_b2) * (1/b2[g]) * DOD + 0*diag(group_length[g]))     %*%     beta[which(group == g)]
-      # BtSB_a[g] <- t(beta[which(group == g)])     %*%     ( 1/a2[g] * Delta_g )     %*%     beta[which(group == g)]
-      # BtSB_b[g] <- t(beta[which(group == g)])     %*%     ( 1/b2[g] * (DOD + epsilon*diag(group_length[g])))     %*%     beta[which(group == g)]
-
-
-      # # identification of group
-      # BtSB[g] <- t(beta[which(group == g)])     %*%     ((1/lambda_a2) *( 1/a2[g]) * Delta_g + (1/lambda_b2) * (1/b2[g]) * DOD + 0*diag(group_length[g]))     %*%     beta[which(group == g)]
-      # if(tau){
-      #   tau2[g] <- rinvgamma(n = 1, shape = (group_length[g]+1)/2, rate = 1/ nu[g] + BtSB[g]/(2*se2*lambda2))
-      #   if(tau2[g] < 1e-5) tau2[g] <- 1e-5
-      #   nu[g] <- rinvgamma(n = 1, shape = 1, rate = 1+1/tau2[g])
-      # }else{
-      #   tau2[g] <- 1
-      # }
-
-      if(a2_){
-        a2[g] <- rinvgamma(n = 1, shape = (group_length[g]+1)/2, rate = 1/ eta_a2[g] +
-                             t(beta[which(group == g)]) %*% Delta_g %*% beta[which(group == g)] / (2*se2*lambda2*lambda_a2*tau2[g]))
-        if(a2[g] < 1e-5) a2[g] <- 1e-5
-        eta_a2[g] <- rinvgamma(n = 1, shape = 1, rate = 1+1/a2[g])
-      }else{
-        a2[g] <- 1
-      }
-
-
-      if(b2_){
-        # print(iter)
-        # if(iter == 17) browser()
-        b2[g] <- rinvgamma(n = 1, shape = (group_length[g]+1)/2, rate = 1/ eta_b2[g] +
-                             t(beta[which(group == g)]) %*% (DOD + epsilon*diag(group_length[g])) %*% beta[which(group == g)] / (2*se2*lambda2*lambda_b2*tau2[g]))
-        if(b2[g] < 1e-5) b2[g] <- 1e-5
-        # b2[g] <- 1e-5
-        eta_b2[g] <- rinvgamma(n = 1, shape = 1, rate = 1+1/b2[g])
-      }else{
-        b2[g] <- 1
-      }
-
-      BtSB[g]   <- t(beta[which(group == g)])     %*%     ((1/lambda_a2) *( 1/a2[g]) * Delta_g + (1/lambda_b2) * (1/b2[g]) * DOD + 0*diag(group_length[g]))     %*%     beta[which(group == g)]
-      BtSB_a[g] <- t(beta[which(group == g)])     %*%     ( 1/a2[g] * Delta_g )     %*%     beta[which(group == g)]
-      BtSB_b[g] <- t(beta[which(group == g)])     %*%     ( 1/b2[g] * (DOD + epsilon*diag(group_length[g])))     %*%     beta[which(group == g)]
-
-    }
-
-    if(lambda_a){
-      rate_lambda_a2 = 1/ksi_a + sum(BtSB_a / tau2) / (2 * se2*lambda2)
-      lambda_a2 <- rinvgamma(n = 1, shape = (p+1)/2, rate = rate_lambda_a2)
-      if(lambda_a2 < 1e-5) lambda_a2 <- 1e-5
-      ksi_a <-  rinvgamma(n = 1, shape = 1, rate = 1+1/lambda_a2)
-    }else{
-      lambda_a2 <- 1
-    }
-
-    if(lambda_b){
-      rate_lambda_b2 = 1/ksi_b + sum(BtSB_b / tau2) / (2 * se2*lambda2)
-      lambda_b2 <- rinvgamma(n = 1, shape = (p+1)/2, rate = rate_lambda_b2)
-      if(lambda_b2 < 1e-5) lambda_b2 <- 1e-5
-      ksi_b <-  rinvgamma(n = 1, shape = 1, rate = 1+1/lambda_b2)
-    }else{
-      lambda_b2 <- 1
-    }
-
-    for(g in 1:G){
-      BtSB[g]   <- t(beta[which(group == g)])     %*%     ((1/lambda_a2) *( 1/a2[g]) * Delta_g_list[[g]] + (1/lambda_b2) * (1/b2[g]) * DOD_list[[g]] + 0*diag(group_length[g]))     %*%     beta[which(group == g)]
-    }
-
-    # lambda2
-    if(lambda){
-      rate_lambda = 1/ksi + sum(BtSB / tau2) / (2 * se2)
-      lambda2 <- rinvgamma(n = 1, shape = (p+1)/2, rate = rate_lambda)
-      if(lambda2 < 1e-5) lambda2 <- 1e-5
-      ksi <-  rinvgamma(n = 1, shape = 1, rate = 1+1/lambda2)
-    }else{lambda2 <- 1}
-
-    # # random effect
-    if(!is.null(A)){
-      Sigma_u <- solve(Ainv / su2 + crossprod(Z)/se2)
-      U <- as.vector(rmvn(1, Sigma_u %*% crossprod(Z, Y - mu - X %*% beta)/se2, Sigma_u))
-      su2 <-  rinvgamma(n = 1, shape = 1/2 + q/2, rate = 1/psi + crossprod(U, Ainv %*% U)/2)
-      psi <-  rinvgamma(n = 1, shape = 1, rate = 1+1/su2)
-      ZU <- Z %*% U
-    }
-
-    # residual variance
-    # if(iter == 100) browser()
-
-    rate_se2 <- 1/a + sum(BtSB/(2*lambda2*tau2)) + crossprod(Y - mu - X %*% beta - ZU)/2
-    se2 <- rinvgamma(n= 1, shape = (1+p+n)/2, rate = rate_se2)
-    a <- rinvgamma(n = 1, shape = 1, rate = 1+1/se2)
-    # se2 <- 2
-
-    # print(iter)
-    # print(se2)
-    #__________________________________________
-    if(iter > burnin & iter %% thinin == 0){
-      chain$mu[ii] <- mu
-      chain$beta[ii, ] <- beta
-      chain$delta[ii, ] <- alpha
-      chain$omega[ii, ] <- omega
-      chain$lambda_delta_2[ii, ] <- a2
-      chain$lambda_omega_2[ii, ] <- b2
-      chain$tau_delta_2[ii] <- lambda_a2
-      chain$tau_omega_2[ii] <- lambda_b2
-      # chain$tau2[ii, ] <- tau2
-      # chain$lambda2[ii] <- lambda2
-      if(!is.null(A)) chain$U[ii, ] <- U
-      if(!is.null(A)) chain$su2[ii] <- su2
-      if(model == 'probit') chain$Y[ii, ] <- Y
-      chain$se2[ii] <- se2
-      ii <- ii + 1
-    }
-
-    iter <- iter + 1
-  }
-  prob_Y_theta <- matrix(NA, length(chain$se2), n); colnames(prob_Y_theta) <- paste0("prob_Y_theta", 1:n)
-  if(is.null(A)){
-    for(nit in 1:length(chain$se2)){
-      mu <- chain$mu[nit]
-      beta = chain$beta[nit, ]
-      se2 = chain$se2[nit]
-      # y.hat <- x %*% beta + Z %*% kronecker(diag(nb_niv), diag(sdu)) %*% chain_h$u[nit, ]
-      prob_Y_theta[nit, ] <- unlist(lapply(1:n, function(i) mvnfast::dmvn(Y[i], mu +X[i, ] %*% beta, se2)))
-    }}else{
-      for(nit in 1:length(chain$se2)){
-        mu <- chain$mu[nit]
-        beta = chain$beta[nit, ]
-        U = chain$U[nit, ]
-        se2 = chain$se2[nit]
-        # y.hat <- x %*% beta + Z %*% kronecker(diag(nb_niv), diag(sdu)) %*% chain_h$u[nit, ]
-        prob_Y_theta[nit, ] <- unlist(lapply(1:n, function(i) mvnfast::dmvn(Y[i], mu +X[i, ] %*% beta + Z[i, ] %*% U, se2)))
-      }
-    }
-  chain$loglikelihood <- rowSums(log(prob_Y_theta))
-  chain$prob_Y_theta <- prob_Y_theta
-  return(chain)
+#' @examples
+plot.effect <- function(fit, type="l", ...){
+  plot(fit$estimations_mean$beta, type=type, ...)
+  lines(fit$estimations_mean$IC_inf_beta, lty = 3)
+  lines(fit$estimations_mean$IC_sup_beta, lty = 3)
+  abline(v=c(0, cumsum(table(fit$settings$group))+0.5))
+  abline(0, 0, lty = 2)
 }
+
 
 
 

@@ -13,6 +13,7 @@ cores <- 3
 
 load("abscission.Rdata")
 
+Y <- DFD
 id_g <- names(X_list); id_g
 X <- do.call(cbind, X_list)
 X_scale <- scale(X)
@@ -35,57 +36,168 @@ system("mkdir results")
 
 system("mkdir results/fused_HS_3L")
 
-fit_fused_HS <- group_fused_HS(
-  y=DFD, X=X_scale, selection = TRUE, degree = 1, nb_group = length(id_g),
-  model = 'gaussian', niter = 15000, burnin = 5000,
-  thin = 20, rep = rep, cores = cores, CV = folds,
-  id.cv = id.cv, path = "results/fused_HS_3L")
 
-save(fit_fused_HS, file = "fit_fused_HS_3L.Rdata")
-plot.effect(fit_fused_HS, t='l', col = 4)
+k=1
+list_chain <- foreach::foreach(k = 1:nrow(pars), .verbose = FALSE) %dopar% {
+  
+  n <- nrow(Y); p <- ncol(X)
+  nb_group <- length(id_g)
+  degree = 1
+  
+  print(k)
+  settings        <- list()
+  settings$niter  <- 10000
+  settings$burnin <- 5000
+  settings$thin   <- 10
+  length_group    <- rep(p/nb_group, nb_group)
+  group  <- rep(1:nb_group, times = length_group)
+  d      <- degree
+  D      <- lapply(table(group), function(p) diff(diag(p), differences = d ))
+  
+  fold <- pars$fold[k]
+  y_train <- Y[which(id.cv[[pars$rep[k]]] != fold)]
+  X_train <- X_scale[which(id.cv[[pars$rep[k]]] != fold), ]
+  y_test <- Y[which(id.cv[[pars$rep[k]]] == fold)]
+  X_test <- X_scale[which(id.cv[[pars$rep[k]]] == fold), ]
+  
+  
+  chain <- group_fused_HS_MCMC(y=y_train, X=X_train, 
+                               group = group, d=d, D=D, 
+                               settings=settings, 
+                               var_sel = TRUE, diff3levels = TRUE)
+  
+  lppd <- sum(log(apply(chain$prob_Y_theta, 2, mean)))
+  Pwaic <- sum(apply(log(chain$prob_Y_theta), 2, var))
+  waic <- -2 * lppd + 2 * Pwaic
+  chain$lppd <- lppd
+  chain$Pwaic <- Pwaic
+  chain$waic <- waic
+  save(chain, settings, file = paste0("results/fused_HS_3L/chain_rep=", pars$rep[k], "_fold_", pars$fold[k], ".Rdata") )
+  return()
+}
 
 
 
 # Group Fusion HS 3L ------------------------------------------------------
 system("mkdir results/fusion_HS_3L")
 
-fit_fusion_HS <- group_fused_HS(
-  y=DFD, X=X_scale, selection = FALSE, degree = 1, nb_group = length(id_g),
-  model = 'gaussian', niter = 15000, burnin = 5000,
-  thin = 20, rep = rep, cores = cores, CV = folds,
-  id.cv = id.cv, path = "results/fusion_HS_3L")
-
-save(fit_fusion_HS, file = "fit_fusion_HS_3L.Rdata")
-plot.effect(fit_fusion_HS, t='l', col = 4)
+k=1
+list_chain <- foreach::foreach(k = 1:nrow(pars), .verbose = FALSE) %dopar% {
+  
+  n <- nrow(Y); p <- ncol(X)
+  nb_group <- length(id_g)
+  degree = 1
+  
+  print(k)
+  settings        <- list()
+  settings$niter  <- 10000
+  settings$burnin <- 5000
+  settings$thin   <- 10
+  length_group    <- rep(p/nb_group, nb_group)
+  group  <- rep(1:nb_group, times = length_group)
+  d      <- degree
+  D      <- lapply(table(group), function(p) diff(diag(p), differences = d ))
+  
+  fold <- pars$fold[k]
+  y_train <- Y[which(id.cv[[pars$rep[k]]] != fold)]
+  X_train <- X_scale[which(id.cv[[pars$rep[k]]] != fold), ]
+  y_test <- Y[which(id.cv[[pars$rep[k]]] == fold)]
+  X_test <- X_scale[which(id.cv[[pars$rep[k]]] == fold), ]
+  
+  
+  chain <- group_fused_HS_MCMC(y=y_train, X=X_train, group = group, d=d, D=D, 
+                               settings=settings, var_sel = FALSE, diff3levels = TRUE)
+  
+  lppd <- sum(log(apply(chain$prob_Y_theta, 2, mean)))
+  Pwaic <- sum(apply(log(chain$prob_Y_theta), 2, var))
+  waic <- -2 * lppd + 2 * Pwaic
+  chain$lppd <- lppd
+  chain$Pwaic <- Pwaic
+  chain$waic <- waic
+  save(chain, settings, file = paste0("results/fusion_HS_3L/chain_rep=", pars$rep[k], "_fold_", pars$fold[k], ".Rdata") )
+  return()
+}
 
 # Group Fused HS 2L ----------------------------------------------------------
 
 system("mkdir results/fused_HS_2L")
 
-fit_fused_HS <- group_fused_HS(
-  y=DFD, X=X_scale, selection = TRUE, degree = 1, nb_group = length(id_g),
-  b2_ = FALSE,
-  model = 'gaussian', niter = 15000, burnin = 5000,
-  thin = 20, rep = rep, cores = cores, CV = folds,
-  id.cv = id.cv, path = "results/fused_HS_2L")
-
-save(fit_fused_HS, file = "fit_fused_HS_2L.Rdata")
-plot.effect(fit_fused_HS, t='l', col = 4)
+list_chain <- foreach::foreach(k = 1:nrow(pars), .verbose = FALSE) %dopar% {
+  
+  n <- nrow(Y); p <- ncol(X)
+  nb_group <- length(id_g)
+  degree = 1
+  
+  print(k)
+  settings        <- list()
+  settings$niter  <- 10000
+  settings$burnin <- 5000
+  settings$thin   <- 10
+  length_group    <- rep(p/nb_group, nb_group)
+  group  <- rep(1:nb_group, times = length_group)
+  d      <- degree
+  D      <- lapply(table(group), function(p) diff(diag(p), differences = d ))
+  
+  fold <- pars$fold[k]
+  y_train <- Y[which(id.cv[[pars$rep[k]]] != fold)]
+  X_train <- X_scale[which(id.cv[[pars$rep[k]]] != fold), ]
+  y_test <- Y[which(id.cv[[pars$rep[k]]] == fold)]
+  X_test <- X_scale[which(id.cv[[pars$rep[k]]] == fold), ]
+  
+  
+  chain <- group_fused_HS_MCMC(y=y_train, X=X_train, group = group, d=d, D=D, 
+                               settings=settings, var_sel = TRUE, diff3levels = FALSE)
+  
+  lppd <- sum(log(apply(chain$prob_Y_theta, 2, mean)))
+  Pwaic <- sum(apply(log(chain$prob_Y_theta), 2, var))
+  waic <- -2 * lppd + 2 * Pwaic
+  chain$lppd <- lppd
+  chain$Pwaic <- Pwaic
+  chain$waic <- waic
+  save(chain, settings, file = paste0("results/fused_HS_2L/chain_rep=", pars$rep[k], "_fold_", pars$fold[k], ".Rdata") )
+  return()
+}
 
 
 
 # Group Fusion HS 2L ------------------------------------------------------
 system("mkdir results/fusion_HS_2L")
 
-fit_fusion_HS <- group_fused_HS(
-  y=DFD, X=X_scale, selection = FALSE, degree = 1, nb_group = length(id_g),
-  b2_ = FALSE,
-  model = 'gaussian', niter = 15000, burnin = 5000,
-  thin = 20, rep = rep, cores = cores, CV = folds,
-  id.cv = id.cv, path = "results/fusion_HS_2L")
-
-save(fit_fusion_HS, file = "fit_fusion_HS_2L.Rdata")
-plot.effect(fit_fusion_HS, t='l', col = 4)
+list_chain <- foreach::foreach(k = 1:nrow(pars), .verbose = FALSE) %dopar% {
+  
+  n <- nrow(Y); p <- ncol(X)
+  nb_group <- length(id_g)
+  degree = 1
+  
+  print(k)
+  settings        <- list()
+  settings$niter  <- 10000
+  settings$burnin <- 5000
+  settings$thin   <- 10
+  length_group    <- rep(p/nb_group, nb_group)
+  group  <- rep(1:nb_group, times = length_group)
+  d      <- degree
+  D      <- lapply(table(group), function(p) diff(diag(p), differences = d ))
+  
+  fold <- pars$fold[k]
+  y_train <- Y[which(id.cv[[pars$rep[k]]] != fold)]
+  X_train <- X_scale[which(id.cv[[pars$rep[k]]] != fold), ]
+  y_test <- Y[which(id.cv[[pars$rep[k]]] == fold)]
+  X_test <- X_scale[which(id.cv[[pars$rep[k]]] == fold), ]
+  
+  
+  chain <- group_fused_HS_MCMC(y=y_train, X=X_train, group=group, d=d, D=D, 
+                               settings=settings, var_sel=FALSE, diff3levels=FALSE)
+  
+  lppd <- sum(log(apply(chain$prob_Y_theta, 2, mean)))
+  Pwaic <- sum(apply(log(chain$prob_Y_theta), 2, var))
+  waic <- -2 * lppd + 2 * Pwaic
+  chain$lppd <- lppd
+  chain$Pwaic <- Pwaic
+  chain$waic <- waic
+  save(chain, settings, file = paste0("results/fusion_HS_2L/chain_rep=", pars$rep[k], "_fold_", pars$fold[k], ".Rdata") )
+  return()
+}
 
 
 # SPLS --------------------------------------------------------------------
@@ -943,7 +1055,7 @@ unique(group_selection$group)
 
 
 # Fused_HS_3_levels ---------------------------------------------------------------
-files <- system("ls results/Fused_HS_3L/" , intern = TRUE)
+files <- system("ls results/fused_HS_3L/" , intern = TRUE)
 present <- rep(NA, nrow(pars))
 for(k in 1: nrow(pars)){
   present[k] <- any(files == paste0("chain_rep_", pars$rep[k], "_fold_", pars$fold[k], ".Rdata"))
@@ -958,7 +1070,37 @@ mcmc_list_chain_hs <- list()
 k=1
 for(k in 1:length(present2)){
   print(k)
-  load(paste0("results/Fused_HS_3L/chain_rep_", pars$rep[present2[k]], "_fold_", pars$fold[present2[k]], ".Rdata"))
+  load(paste0("results/fused_HS_3L/chain_rep_", pars$rep[present2[k]], "_fold_", pars$fold[present2[k]], ".Rdata"))
+  
+  colnames(chain$beta) <- paste0("b", 1:ncol(chain$beta))
+  tmp <- do.call(cbind, chain[c("beta", "mu", "se2")])
+  mcmc_list_chain_hs[[k]] <- coda::mcmc(tmp)#, thin = thinin, start = burnin+1, end = niter)
+  rm(chain)
+}
+mcmc_list_hs <- coda::mcmc.list(mcmc_list_chain_hs); rm(mcmc_list_chain_hs)
+gelman.diag_hs <- coda::gelman.diag(mcmc_list_hs)
+gelman.diag_hs
+plot(gelman.diag_hs$psrf[paste0("b", 1:1089), 1], ylab = "", ylim=c(1, 1.2), main = "fHS"); abline(1.1, 0, lty=2, col = 2, lwd=2)
+gelman.diag_hs[[1]][c("mu", "se2"), ]
+summary(gelman.diag_hs[[1]][, 1])
+
+# Fused_HS_2_levels ---------------------------------------------------------------
+files <- system("ls results/fused_HS_2L/" , intern = TRUE)
+present <- rep(NA, nrow(pars))
+for(k in 1: nrow(pars)){
+  present[k] <- any(files == paste0("chain_rep_", pars$rep[k], "_fold_", pars$fold[k], ".Rdata"))
+}
+which(!present)
+sum(present)
+
+present2 <- which(present)
+
+# HS
+mcmc_list_chain_hs <- list()
+k=1
+for(k in 1:length(present2)){
+  print(k)
+  load(paste0("results/fused_HS_2L/chain_rep_", pars$rep[present2[k]], "_fold_", pars$fold[present2[k]], ".Rdata"))
   
   colnames(chain$beta) <- paste0("b", 1:ncol(chain$beta))
   tmp <- do.call(cbind, chain[c("beta", "mu", "se2")])
@@ -976,11 +1118,10 @@ summary(gelman.diag_hs[[1]][, 1])
 
 
 
-
 # Fusion_HS_3_levels ---------------------------------------------------------------
-files <- system("ls results/Fusion_HS_3L/" , intern = TRUE)
-present <- rep(NA, 100)
-for(k in 1:100){
+files <- system("ls results/fusion_HS_3L/" , intern = TRUE)
+present <- rep(NA, nrow(pars))
+for(k in 1:nrow(pars)){
   present[k] <- any(files == paste0("chain_rep_", pars$rep[k], "_fold_", pars$fold[k], ".Rdata"))
 }
 which(!present)
@@ -992,7 +1133,7 @@ mcmc_list_chain_hs <- list()
 k=1
 for(k in 1:length(present2)){
   print(k)
-  load(paste0("results/Fusion_HS_3L/chain_rep_", pars$rep[present2[k]], "_fold_", pars$fold[present2[k]], ".Rdata"))
+  load(paste0("results/fusion_HS_3L/chain_rep_", pars$rep[present2[k]], "_fold_", pars$fold[present2[k]], ".Rdata"))
   
   colnames(chain$beta) <- paste0("b", 1:ncol(chain$beta))
   tmp <- do.call(cbind, chain[c("beta", "mu", "se2")])
@@ -1008,6 +1149,35 @@ summary(gelman.diag_hs[[1]][, 1])
 summary(gelman.diag_hs$psrf[paste0("b", 1:1089), 1])
 
 
+# Fusion_HS_2_levels ---------------------------------------------------------------
+files <- system("ls results/fusion_HS_2L/" , intern = TRUE)
+present <- rep(NA, nrow(pars))
+for(k in 1:nrow(pars)){
+  present[k] <- any(files == paste0("chain_rep_", pars$rep[k], "_fold_", pars$fold[k], ".Rdata"))
+}
+which(!present)
+sum(present)
+present2 <- which(present)
+
+# HS
+mcmc_list_chain_hs <- list()
+k=1
+for(k in 1:length(present2)){
+  print(k)
+  load(paste0("results/fusion_HS_2L/chain_rep_", pars$rep[present2[k]], "_fold_", pars$fold[present2[k]], ".Rdata"))
+  
+  colnames(chain$beta) <- paste0("b", 1:ncol(chain$beta))
+  tmp <- do.call(cbind, chain[c("beta", "mu", "se2")])
+  mcmc_list_chain_hs[[k]] <- coda::mcmc(tmp)#, thin = thinin, start = burnin+1, end = niter)
+  rm(chain)
+}
+mcmc_list_hs <- coda::mcmc.list(mcmc_list_chain_hs); rm(mcmc_list_chain_hs)
+gelman.diag_hs <- coda::gelman.diag(mcmc_list_hs)
+gelman.diag_hs
+plot(gelman.diag_hs$psrf[paste0("b", 1:1089), 1], ylab = "", ylim=c(1, 1.2), main = "fHS"); abline(1.1, 0, lty=2, col = 2, lwd=2)
+gelman.diag_hs[[1]][c("mu", "se2"), ]
+summary(gelman.diag_hs[[1]][, 1])
+summary(gelman.diag_hs$psrf[paste0("b", 1:1089), 1])
 
 
 
