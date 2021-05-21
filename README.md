@@ -24,10 +24,7 @@ It contains:
   * `X_list`, a list containing 9 1173x121-matrices of measurements associated to the 9 environmental variables (Tmax, Tmin, RH, VPD, FTSW, DRD, SD, R and SR)
 
 ### Description of the R functions:
-`algo_group_fusion_horseshoe.R` file contains three functions:
-
-
-**The `group_fused_HS_MCMC` function** allows to run the MCMC sampler (for one chain) for the group fusion / fused horseshoe approach. 
+`algo_group_fusion_horseshoe.R` file contains the `group_fused_HS_MCMC` function which allows to run the MCMC sampler (for one chain) for the group fusion / fused horseshoe approach. 
 The arguments of this function are:
 
 * `y`: vector ofthe response variable
@@ -47,7 +44,7 @@ The arguments of this function are:
 * `var_sel`: boolean indicating if selection of variable is needed (fused) or not (fusion), default choice is TRUE
 
 
-It return a list of the MCMC samples of each parameter.
+It return a list of the MCMC samples for each parameter.
 
 
 
